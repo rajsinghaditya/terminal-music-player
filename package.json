@@ -1,0 +1,19 @@
+{
+  "name": "terminal-music-player",
+  "version": "0.1.0",
+  "description": "A terminal-based music player built with Node.js — In-Class Project",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "keywords": [
+    "terminal",
+    "music-player",
+    "cli",
+    "nodejs"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "music-metadata": "^10.6.4"
+  }
+}
