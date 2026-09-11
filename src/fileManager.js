@@ -158,6 +158,28 @@ class FileManager {
       bitrate: 0,
     };
   }
+
+  /**
+   * Sort an array of songs by a given field.
+   *
+   * @param {Array} songs - Array of song objects
+   * @param {'title'|'artist'|'album'|'duration'} field - Field to sort by
+   * @returns {Array} Sorted array (mutates in place and returns)
+   */
+  static sortBy(songs, field) {
+    return songs.sort((a, b) => {
+      if (field === 'duration') return (a.duration || 0) - (b.duration || 0);
+      return (a[field] || '').localeCompare(b[field] || '');
+    });
+  }
+
+  /**
+   * Get the list of supported audio formats for display.
+   * @returns {string[]}
+   */
+  static getSupportedFormats() {
+    return [...SUPPORTED_EXTENSIONS].map(ext => ext.slice(1).toUpperCase());
+  }
 }
 
 module.exports = FileManager;
