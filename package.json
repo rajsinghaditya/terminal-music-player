@@ -1,8 +1,11 @@
 {
   "name": "terminal-music-player",
-  "version": "0.1.0",
-  "description": "A terminal-based music player built with Node.js — In-Class Project",
+  "version": "1.0.0",
+  "description": "A fully interactive terminal-based music player built with Node.js — In-Class Project",
   "main": "src/index.js",
+  "bin": {
+    "tmusic": "src/index.js"
+  },
   "scripts": {
     "start": "node src/index.js"
   },
@@ -10,7 +13,8 @@
     "terminal",
     "music-player",
     "cli",
-    "nodejs"
+    "nodejs",
+    "tui"
   ],
   "license": "MIT",
   "dependencies": {

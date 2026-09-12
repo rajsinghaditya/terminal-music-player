@@ -2,123 +2,325 @@
 
 /**
  * ═══════════════════════════════════════════════════════════
- *  Terminal Music Player — Entry Point (Day 1)
+ *  Terminal Music Player — Entry Point (Day 2)
  * ═══════════════════════════════════════════════════════════
  *
  *  Usage:
  *    node src/index.js              → scans ./music
  *    node src/index.js ~/Music      → scans a custom directory
  *
- *  This version (Day 1) scans a directory for audio files
- *  and prints a formatted table of discovered tracks.
+ *  This is the fully interactive version. It provides:
+ *  - Full-screen TUI with keyboard controls
+ *  - Audio playback via macOS afplay
+ *  - Shuffle, repeat, search
  *
  *  Concepts demonstrated:
- *  - CLI argument parsing (process.argv)
- *  - Async entry point with top-level error handling
- *  - Formatted console output (padEnd for alignment)
+ *  - readline in raw mode for single-keypress input
+ *  - setInterval for periodic UI refresh
+ *  - Coordinating multiple modules (Player, Playlist, UI, FileManager)
+ *  - Graceful shutdown with signal handling
  */
 
 const path = require('path');
+const readline = require('readline');
 const FileManager = require('./fileManager');
+const Player = require('./player');
+const Playlist = require('./playlist');
+const UI = require('./ui');
+
+// ── Application State ──────────────────────────────────────
+const state = {
+  tracks: [],       // All loaded tracks
+  cursor: 0,        // Cursor position in track list
+  playing: -1,      // Index of currently playing track (-1 = none)
+  player: null,     // Player instance
+  playlist: null,   // Playlist instance
+  searchMode: false, // Whether we're in search mode
+  searchQuery: '',  // Current search text
+  searchResults: [],// Matching track indices
+};
+
+// ── Instances ──────────────────────────────────────────────
+const ui = new UI();
+let refreshTimer = null;
 
 /**
- * Format seconds into MM:SS string.
- * @param {number} seconds
- * @returns {string} e.g. "03:45"
+ * Play the track at the current playlist position.
  */
-function formatTime(seconds) {
-  if (!seconds || seconds <= 0) return '--:--';
-  const mins = Math.floor(seconds / 60);
-  const secs = Math.floor(seconds % 60);
-  return mins.toString().padStart(2, '0') + ':' + secs.toString().padStart(2, '0');
+function playCurrentTrack() {
+  const track = state.playlist.currentTrack;
+  if (!track) return;
+
+  state.playing = state.playlist.currentIndex;
+  state.cursor = state.playing;
+  state.player.play(track);
 }
 
 /**
- * Print a formatted table of songs to the console.
- * @param {Array} songs - Array of song metadata objects
+ * Handle 'next track' action.
+ * Called by user pressing 'n' or when a track ends naturally.
  */
-function printTrackTable(songs) {
-  // Column headers
-  const header = '  '
-    + '#'.padEnd(5)
-    + 'Title'.padEnd(30)
-    + 'Artist'.padEnd(25)
-    + 'Duration'.padEnd(10)
-    + 'Format';
-
-  const separator = '  ' + '─'.repeat(75);
-
-  console.log(separator);
-  console.log(header);
-  console.log(separator);
-
-  songs.forEach((song, index) => {
-    // Truncate long strings to fit in columns
-    const title = song.title.length > 27
-      ? song.title.slice(0, 24) + '...'
-      : song.title;
-
-    const artist = song.artist.length > 22
-      ? song.artist.slice(0, 19) + '...'
-      : song.artist;
-
-    const row = '  '
-      + String(index + 1).padEnd(5)
-      + title.padEnd(30)
-      + artist.padEnd(25)
-      + formatTime(song.duration).padEnd(10)
-      + song.format;
-
-    console.log(row);
-  });
-
-  console.log(separator);
+function handleNext() {
+  const next = state.playlist.next();
+  if (next) {
+    playCurrentTrack();
+  } else {
+    // No more tracks — stop
+    state.player.stop();
+    state.playing = -1;
+  }
 }
 
 /**
- * Main function — scans the music directory and displays results.
+ * Handle 'previous track' action.
+ */
+function handlePrevious() {
+  // If we're more than 3 seconds in, restart the current track
+  if (state.player.elapsed > 3) {
+    state.player.elapsed = 0;
+    playCurrentTrack();
+    return;
+  }
+
+  state.playlist.previous();
+  playCurrentTrack();
+}
+
+/**
+ * Handle keyboard input.
+ * In raw mode, we receive individual key buffers.
+ *
+ * @param {Buffer} key - Raw key buffer from stdin
+ */
+function handleKey(key) {
+  const str = key.toString();
+
+  // ── Search Mode Input ──────────────────────────────
+  if (state.searchMode) {
+    if (str === '\x1b' || str === '\x1b[A' || str === '\x1b[B') {
+      // Escape or arrow keys — exit search
+      state.searchMode = false;
+      state.searchQuery = '';
+      state.searchResults = [];
+    } else if (str === '\r' || str === '\n') {
+      // Enter — jump to first result and exit search
+      if (state.searchResults.length > 0) {
+        state.cursor = state.searchResults[0];
+      }
+      state.searchMode = false;
+    } else if (str === '\x7f' || str === '\b') {
+      // Backspace
+      state.searchQuery = state.searchQuery.slice(0, -1);
+      state.searchResults = state.searchQuery
+        ? state.playlist.search(state.searchQuery)
+        : [];
+    } else if (str.length === 1 && str >= ' ') {
+      // Printable character
+      state.searchQuery += str;
+      state.searchResults = state.playlist.search(state.searchQuery);
+      // Auto-scroll to first match
+      if (state.searchResults.length > 0) {
+        state.cursor = state.searchResults[0];
+      }
+    }
+    return;
+  }
+
+  // ── Normal Mode Input ─────────────────────────────
+
+  switch (str) {
+    // ── Navigation ──
+    case '\x1b[A': // Up arrow
+      state.cursor = Math.max(0, state.cursor - 1);
+      break;
+
+    case '\x1b[B': // Down arrow
+      state.cursor = Math.min(state.tracks.length - 1, state.cursor + 1);
+      break;
+
+    case '\x1b[5~': // Page Up
+      state.cursor = Math.max(0, state.cursor - 10);
+      break;
+
+    case '\x1b[6~': // Page Down
+      state.cursor = Math.min(state.tracks.length - 1, state.cursor + 10);
+      break;
+
+    case 'g': // Go to top
+      state.cursor = 0;
+      break;
+
+    case 'G': // Go to bottom
+      state.cursor = state.tracks.length - 1;
+      break;
+
+    // ── Playback ──
+    case '\r': // Enter — play selected track
+    case '\n':
+      state.playlist.select(state.cursor);
+      playCurrentTrack();
+      break;
+
+    case ' ': // Space — toggle pause
+      state.player.togglePause();
+      break;
+
+    case 'n': // Next track
+      handleNext();
+      break;
+
+    case 'p': // Previous track
+      handlePrevious();
+      break;
+
+    // ── Volume ──
+    case '+':
+    case '=':
+      state.player.adjustVolume(0.1);
+      break;
+
+    case '-':
+    case '_':
+      state.player.adjustVolume(-0.1);
+      break;
+
+    // ── Modes ──
+    case 's': // Toggle shuffle
+      state.playlist.toggleShuffle();
+      state.tracks = state.playlist.tracks;
+      // Update playing index to reflect new order
+      if (state.player.currentSong) {
+        state.playing = state.tracks.findIndex(
+          t => t.path === state.player.currentSong.path
+        );
+      }
+      break;
+
+    case 'r': // Cycle repeat mode
+      state.playlist.cycleRepeat();
+      break;
+
+    // ── Search ──
+    case '/':
+      state.searchMode = true;
+      state.searchQuery = '';
+      state.searchResults = [];
+      break;
+
+    // ── Quit ──
+    case 'q':
+    case '\x03': // Ctrl+C
+      shutdown();
+      break;
+  }
+}
+
+/**
+ * Clean up and exit gracefully.
+ */
+function shutdown() {
+  // Stop playback
+  if (state.player) {
+    state.player.stop();
+  }
+
+  // Stop the refresh timer
+  if (refreshTimer) {
+    clearInterval(refreshTimer);
+  }
+
+  // Restore terminal state
+  process.stdout.write('\x1b[?25h'); // Show cursor
+  process.stdout.write('\x1b[2J');   // Clear screen
+  process.stdout.write('\x1b[H');    // Move to home
+
+  console.log();
+  console.log('  👋 Thanks for using Terminal Music Player!');
+  console.log();
+
+  process.exit(0);
+}
+
+/**
+ * Main entry point.
  */
 async function main() {
-  // Parse the music directory from CLI arguments
-  // process.argv[0] = node, process.argv[1] = script path, [2] = user arg
+  // Parse CLI arguments
   const musicDir = process.argv[2]
     ? path.resolve(process.argv[2])
     : path.join(process.cwd(), 'music');
 
-  console.log();
-  console.log('  🎵 Terminal Music Player — Library Scanner');
-  console.log('  Scanning: ' + musicDir);
-  console.log();
-
-  // Create a FileManager and scan for audio files
+  // Scan for audio files
   const fileManager = new FileManager(musicDir);
   const songs = await fileManager.scan();
 
   if (songs.length === 0) {
+    console.log();
+    console.log('  🎵 Terminal Music Player');
+    console.log();
     console.log('  ⚠️  No audio files found!');
     console.log();
     console.log('  To get started, add music files to:');
     console.log('  ' + musicDir);
     console.log();
-    console.log('  Supported formats: MP3, WAV, FLAC, OGG, M4A, AAC, WMA');
+    console.log('  Supported formats: ' + FileManager.getSupportedFormats().join(', '));
     console.log();
     return;
   }
 
-  // Display results
-  console.log('  Found ' + songs.length + ' track(s):');
-  console.log();
-  printTrackTable(songs);
+  // Sort by title by default
+  FileManager.sortBy(songs, 'title');
 
-  // Show total duration
-  const totalSeconds = songs.reduce((sum, s) => sum + (s.duration || 0), 0);
-  console.log();
-  console.log('  Total library duration: ' + formatTime(totalSeconds));
-  console.log();
+  // Initialize modules
+  state.tracks = songs;
+  state.player = new Player();
+  state.playlist = new Playlist(songs);
+
+  // When a track ends naturally, auto-play next
+  state.player.on('trackEnd', () => {
+    handleNext();
+  });
+
+  // ── Set up terminal ──────────────────────────────────
+  // Enable raw mode so we get individual keypresses
+  if (process.stdin.isTTY) {
+    readline.emitKeypressEvents(process.stdin);
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+  } else {
+    console.error('  ❌ Terminal required. Cannot run in non-interactive mode.');
+    process.exit(1);
+  }
+
+  // Hide cursor for a cleaner UI
+  process.stdout.write('\x1b[?25h'); // Ensure cursor is shown first
+  process.stdout.write('\x1b[?25l'); // Then hide it
+  process.stdout.write('\x1b[2J');   // Clear screen
+
+  // Listen for keypresses
+  process.stdin.on('data', handleKey);
+
+  // Handle terminal resize
+  process.stdout.on('resize', () => {
+    ui.render(state);
+  });
+
+  // Handle signals for graceful shutdown
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+
+  // ── Start the UI refresh loop ─────────────────────────
+  // Re-render every 500ms to update the progress bar
+  ui.render(state);
+  refreshTimer = setInterval(() => {
+    ui.render(state);
+  }, 500);
 }
 
-// Run the main function and handle any unhandled errors
+// Run
 main().catch((err) => {
+  // Restore cursor on error
+  process.stdout.write('\x1b[?25h');
   console.error('  ❌ Error:', err.message);
   process.exit(1);
 });
